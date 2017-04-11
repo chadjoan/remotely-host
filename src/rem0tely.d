@@ -26,15 +26,33 @@ immutable string usage =
 `~`             Prevents rem0tely from invoking itself with the 'sudo' command
 `~`             automatically when it runs into permissions problems.
 `~`
+`~`     --nfs-afterwards {on,off,earlier}
 `~`     --nfs-afterwards={on,off,earlier}
 `~`             This option determines whether the NFS service is left running
 `~`             or stopped after rem0tely finishes executing the remote task.
 `~`             The 'earlier' value will turn the NFS service off only if it
 `~`             was already off when rem0tely began executing.
 `~`             The default is --nfs-afterwards=earlier
+`~`
+`~`     --ssh-opts <string>
+`~`     --ssh-opts=<string>
+`~`             Pass the ssh options given in the string to the ssh invocation.
 `;
 
+/// Throwing this will cause the program to exit, but it will not print any
+/// stack traces or other debugging information.  This is intended for when
+/// code needs the program to exit gracefully and immediately, and has already
+/// provided the user all of the information they need to know (if any).
 class AbortException : Exception
+{
+	this() { super(""); }
+}
+
+/// Similar to AbortException, except throwing this will cause printUsage to
+/// be called before exit.  Note that printUsage will only print usage if it
+/// hasn't been printed already, so it is safe to throw this as a way to
+/// guarantee that usage will be printed without the risk of printing twice.
+class UsageException : Exception
 {
 	this() { super(""); }
 }
@@ -76,6 +94,7 @@ class Config
 	string         userhost;
 	string         command;
 	string[]       commandArgs;
+	string         sshOpts = "";
 
 	// Internal state.
 	bool           neverSudo = false;
@@ -104,33 +123,85 @@ int main(string[] args)
 {
 	int result = 1;
 	try result = _main(args);
+	catch(UsageException e) {
+		result = 1;
+		printUsage();
+	}
 	catch(AbortException e) result = 1;
 	catch(PrintUsage e) {
 		result = 0;
-		stdout.writeln(usage);
+		printUsage();
 	}
 	catch(SudoEscalation e) result = e.execStatus;
 	return result;
 }
 
+void printUsage()
+{
+	static bool usagePrinted = false;
+
+	if ( usagePrinted )
+		return;
+
+	stdout.writeln(usage);
+	usagePrinted = true;
+}
+
 Config parseArgs(string[] args)
 {
-	import std.algorithm.searching : canFind, skipOver;
+	import std.algorithm.searching : canFind, findSplit, startsWith;
 
 	foreach(arg; args[1..$])
 		if ( arg == "--help" )
 			throw new PrintUsage();
 
 	if ( args.length < 4 ) {
-		stdout.writeln(usage);
+		printUsage();
 		stderr.writeln("rem0tely: Error: Need at least 3 arguments (including the --).");
-		throw new AbortException();
+		throw new UsageException();
 	}
 
 	auto cfg = new Config(args);
 	for ( size_t i = 1; i < args.length; i++ )
 	{
 		string arg = args[i];
+		string value = null;
+
+		auto valSplit = arg.findSplit("=");
+		arg = valSplit[0];
+		value = valSplit[2];
+
+		void consumeValue(string optName)
+		{
+			if ( value !is null && value.length > 0 )
+				return; // The findSplit already parsed it out.
+
+			i++;
+
+			if ( i < args.length && !args[i].startsWith("--") )
+				value = args[i];
+			else
+			{
+				printUsage();
+				stderr.writefln(
+					"rem0tely: Error: Missing value for argument "~optName);
+				throw new UsageException();
+			}
+		}
+
+		if ( arg == "--nfs-afterwards" )
+			consumeValue("--nfs-afterwards");
+		else
+		if ( arg == "--ssh-opts" )
+			consumeValue("--ssh-opts");
+
+		void errorUnrecognizedValue() {
+			printUsage();
+			stderr.writefln(
+				"rem0tely: Error: "~
+				"Unrecognized value for the %s option: %s", arg, value);
+			throw new UsageException();
+		}
 
 		if ( arg.canFind('@') )
 			cfg.userhost = arg;
@@ -138,20 +209,19 @@ Config parseArgs(string[] args)
 		if ( arg == "--no-sudo" )
 			cfg.neverSudo = true;
 		else
-		if ( arg.skipOver("--nfs-afterwards=") )
+		if ( arg == "--nfs-afterwards=" )
 		{
-			switch(arg)
+			switch(value)
 			{
 				case "on":      cfg.nfsAfter = NfsAfterwards.on;      break;
 				case "off":     cfg.nfsAfter = NfsAfterwards.off;     break;
 				case "earlier": cfg.nfsAfter = NfsAfterwards.earlier; break;
-				default:
-					stderr.writefln(
-						"rem0tely: Error: "~
-						"Unrecognized value for the --nfs-afterwards option: %s", arg);
-					throw new AbortException();
+				default:        errorUnrecognizedValue();
 			}
 		}
+		else
+		if ( arg == "--ssh-opts" )
+			cfg.sshOpts = value;
 		else
 		if ( arg == "--" )
 		{
@@ -163,22 +233,22 @@ Config parseArgs(string[] args)
 		}
 		else
 		{
-			stdout.writeln (usage);
+			printUsage();
 			stderr.writefln("rem0tely: Error: Unrecongized argument %s", arg);
-			throw new AbortException();
+			throw new UsageException();
 		}
 	}
 
 	if ( cfg.userhost is null || cfg.userhost == "" ) {
-		stdout.writeln(usage);
+		printUsage();
 		stderr.writeln("rem0tely: Error: Missing user@host information.");
-		throw new AbortException();
+		throw new UsageException();
 	}
 
 	if ( cfg.command is null || cfg.command == "" ) {
-		stdout.writeln (usage);
+		printUsage();
 		stderr.writeln("rem0tely: Error: Missing command to run.");
-		throw new AbortException();
+		throw new UsageException();
 	}
 
 	return cfg;
@@ -648,8 +718,8 @@ int runCommand(Config cfg)
 
 	debug writefln("Running command %s", cfg.command);
 	auto pid = std.process.spawnShell(format(
-		"ssh -R 2049:localhost:3049 %s rem0tely-host %s %s",
-		cfg.userhost, cfg.command, cfg.commandArgs.joiner(" ")));
+		"ssh %s -R 2049:localhost:3049 %s rem0tely-host %s %s",
+		cfg.sshOpts, cfg.userhost, cfg.command, cfg.commandArgs.joiner(" ")));
 	debug writeln("Done: command");
 	return wait(pid);
 }
