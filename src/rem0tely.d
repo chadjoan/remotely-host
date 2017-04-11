@@ -304,11 +304,6 @@ void ensureNfsStarted(Config cfg)
 
 	auto bashPath = whichBash.output.strip;
 
-	//string nfsStartCmd = "/etc/init.d/nfs --ifstopped start";
-
-	//auto res = executeShell(nfsStartCmd);
-	//auto res = execute(["/etc/init.d/nfs","--ifstopped","start"]);
-	//auto pipes = pipeShell(nfsStartCmd,  Redirect.stdin | Redirect.stdout | Redirect.stderrToStdout);
 	debug writeln("Running openrc-run.");
 
 	// The bash snippet below is a bit of a monstrosity; sorry.
@@ -377,13 +372,6 @@ void ensureNfsStarted(Config cfg)
 	auto returnCode = ret.status;
 	auto output = (cast(char[])byteSink.data).assumeUnique;
 
-	/+
-	auto ret = executeShell("/etc/init.d/nfs start",
-		null, std.process.Config.none, size_t.max, null, bashPath);
-	auto returnCode = ret.status;
-	auto output = ret.output;
-+/
-
 	debug writefln("Done: openrc-run. (%d)", returnCode);
 
 	// We check for return code 1 and an empty output, because this is how
@@ -418,42 +406,6 @@ void ensureNfsStarted(Config cfg)
 	stderr.writefln("rem0tely: Received return code %d from /etc/init.d/nfs.", returnCode);
 	stderr.writeln ("rem0tely: This makes it impossible to continue, so this operation will be aborted.");
 	throw new AbortException();
-
-	/+
-	void abort() {
-		stderr.writeln("rem0tely: Error: Failed to start NFS on local machine.");
-		stderr.writeln("rem0tely: This makes it impossible to continue, so this operation will be aborted.");
-		throw new AbortException();
-	}
-	...
-
-	if ( !alwaysSudo )
-	{
-		auto res = executeShell(nfsStartCmd);
-		if ( res.status == 0 )
-			return; // Success.
-
-		if ( res.output.countUntil("superuser access required") < 0 ) {
-			// Failure for reasons besides needing root access.
-			stderr.writeln(res.output);
-			abort();
-		}
-
-		// Failure because we need root.
-		cfg.alwaysSudo = true;
-	}
-
-	// Now we try to use sudo to escalate to root.
-	// This can possibly use a password prompt, so we use pipeShell to allow
-	// stdin to be redirected.  We won't be able to buffer and search the
-	// output like with executeShell, but that is OK here; we wouldn't be able
-	// to do anything with it at this point anyways.
-	auto pipes = pipeShell("sudo "~nfsStartCmd);
-	if ( wait(pipes.pid) == 0 )
-		return; // Success.
-
-	abort(); // Failure in general.
-	+/
 }
 
 private string getBindPath(Config cfg)
@@ -495,62 +447,6 @@ void setupNfsEntry(Config cfg)
 	scope(failure) bindUnmount(cfg, bindPath);
 
 	addExport(cfg, bindPath);
-
-	/+
-	import std.algorithm.searching : countUntil;
-
-	void abort() {
-		stderr.writeln("rem0tely: Error: Failed add NFS share to exports table.");
-		throw new AbortException();
-	}
-
-	auto local_uid = geteuid();
-	auto local_gid = getegid();
-
-	string linkPath = getLinkPath(cfg);
-
-	// This will throw if there's a problem.
-	// (It will also throw if the link exists already, and because it throws
-	// with the same FileException as other problems, this is kind of annoying
-	// because of how it becomes difficult to identify whether the outcome is
-	// acceptable or not.  However, this program should never have created this
-	// link before, so we should never get a FileException from an
-	// already-existing link, at least in our case.)
-	symlink("/", linkPath);
-
-	if ( !alwaysSudo )
-	{
-		string exportfsCmd = format(
-			"exportfs -o insecure,rw,fsid=root,nohide,crossmnt,no_subtree_check,all_squash,"~
-			"anonuid=%d,anongid=%d localhost:%s",
-			local_uid, local_gid, linkPath);
-
-		auto res = executeShell(exportfsCmd);
-		if ( res.status == 0 )
-			return; // Success.
-
-		if ( res.output.countUntil("command not found") < 0
-		&&   res.output.countUntil("Permission denied") < 0 ) {
-			// Failure for reasons besides needing root access.
-			stderr.writeln(res.output);
-			abort();
-		}
-
-		// Failure because we (maybe) need root.
-		alwaysSudo = true;
-	}
-
-	// Now we try to use sudo to escalate to root.
-	// This can possibly use a password prompt, so we use pipeShell to allow
-	// stdin to be redirected.  We won't be able to buffer and search the
-	// output like with executeShell, but that is OK here; we wouldn't be able
-	// to do anything with it at this point anyways.
-	auto pipes = pipeShell("sudo "~exportfsCmd);
-	if ( wait(pipes.pid) != 0 )
-		abort();
-
-	// Success!
-	+/
 }
 
 void bindMount(Config cfg, string bindPath)
@@ -618,33 +514,6 @@ void clearNfsEntry(Config cfg)
 	removeExport(cfg, bindPath);
 	bindUnmount(cfg, bindPath);
 	removeMountPoint(cfg, bindPath);
-
-	/+
-	string linkPath = getLinkPath(cfg);
-
-	auto pipes = pipeShell(format("exportfs -u localhost:%s",linkPath));
-	if ( wait(pipes.pid) != 0 ) {
-		stderr.writeln("rem0tely: Warning: Failed remove NFS share (localhost:%s)", linkPath);
-		stderr.writeln("rem0tely:          from exports table.");
-		stderr.writeln("rem0tely:          The entry is only sharing to localhost, so");
-		stderr.writeln("rem0tely:          it should not cause significant security");
-		stderr.writeln("rem0tely:          issues, but this could junk up the exports table");
-		stderr.writeln("rem0tely:          If you desire to fix this, then you may want to");
-		stderr.writeln("rem0tely:          consult the 'exportfs' manpage to learn how to");
-		stderr.writeln("rem0tely:          use the 'exportfs' command to examine or remove");
-		stderr.writeln("rem0tely:          NFS exports table entries.");
-	}
-
-	try
-		remove(linkPath);
-	catch ( FileException e ) {
-		stderr.writeln (e.msg);
-		stderr.writefln("rem0tely: Warning: Could not remove root-directory symlink %s", linkPath);
-		stderr.writeln ("rem0tely:          This symlink is used to identify unique NFS settings.");
-		stderr.writeln ("rem0tely:          If it still exists, it shouldn't cause any");
-		stderr.writeln ("rem0tely:          problems.  It just adds clutter to /tmp");
-	}
-	+/
 }
 
 void removeMountPoint(Config cfg, string bindPath)
