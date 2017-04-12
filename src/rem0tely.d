@@ -3,6 +3,7 @@ import std.stdio;
 immutable string usage =
 `Usage:
 `~`rem0tely [options] user@host [options] -- command [args for command]
+`~`rem0tely --one-sided [options] user@host [options]
 `~/+`
 `~`This requires the local machine to have an entry similar to this in its
 `~`/etc/exports file:
@@ -22,10 +23,6 @@ immutable string usage =
 `~`             Displays this help message.  All other arguments are ignored
 `~`             when this is used.
 `~`
-`~`     --no-sudo
-`~`             Prevents rem0tely from invoking itself with the 'sudo' command
-`~`             automatically when it runs into permissions problems.
-`~`
 `~`     --nfs-afterwards {on,off,earlier}
 `~`     --nfs-afterwards={on,off,earlier}
 `~`             This option determines whether the NFS service is left running
@@ -33,6 +30,20 @@ immutable string usage =
 `~`             The 'earlier' value will turn the NFS service off only if it
 `~`             was already off when rem0tely began executing.
 `~`             The default is --nfs-afterwards=earlier
+`~`
+`~`     --no-sudo
+`~`             Prevents rem0tely from invoking itself with the 'sudo' command
+`~`             automatically when it runs into permissions problems.
+`~`
+`~`     --one-sided
+`~`             Set up the everything on the local machine and ssh into the
+`~`             host, but do not run any commands on the host.  This will
+`~`             result in a shell session on the host that can be experimented
+`~`             with while the local machine has all NFS mechanisms set up.
+`~`             This is useful for debugging and observing rem0tely's system
+`~`             changes during a session.
+`~`             If this is used, the 'command' argument will be ignored, as
+`~`             well as any of its arguments and options.
 `~`
 `~`     --ssh-opts <string>
 `~`     --ssh-opts=<string>
@@ -95,12 +106,13 @@ class Config
 	string         command;
 	string[]       commandArgs;
 	string         sshOpts = "";
+	bool           oneSided = false;
+	bool           neverSudo = false;
+	NfsAfterwards  nfsAfter = NfsAfterwards.earlier;
 
 	// Internal state.
-	bool           neverSudo = false;
 	SysTime        startTime;
 	bool           nfsWasOn = false;
-	NfsAfterwards  nfsAfter = NfsAfterwards.earlier;
 
 	this(string[] args) {
 		import std.datetime : Clock;
@@ -155,11 +167,14 @@ Config parseArgs(string[] args)
 		if ( arg == "--help" )
 			throw new PrintUsage();
 
+	/+
+	// The argument structure used to be more predictable...
 	if ( args.length < 4 ) {
 		printUsage();
 		stderr.writeln("rem0tely: Error: Need at least 3 arguments (including the --).");
 		throw new UsageException();
 	}
+	+/
 
 	auto cfg = new Config(args);
 	for ( size_t i = 1; i < args.length; i++ )
@@ -206,9 +221,6 @@ Config parseArgs(string[] args)
 		if ( arg.canFind('@') )
 			cfg.userhost = arg;
 		else
-		if ( arg == "--no-sudo" )
-			cfg.neverSudo = true;
-		else
 		if ( arg == "--nfs-afterwards=" )
 		{
 			switch(value)
@@ -219,6 +231,12 @@ Config parseArgs(string[] args)
 				default:        errorUnrecognizedValue();
 			}
 		}
+		else
+		if ( arg == "--no-sudo" )
+			cfg.neverSudo = true;
+		else
+		if ( arg == "--one-sided" )
+			cfg.oneSided = true;
 		else
 		if ( arg == "--ssh-opts" )
 			cfg.sshOpts = value;
@@ -245,7 +263,7 @@ Config parseArgs(string[] args)
 		throw new UsageException();
 	}
 
-	if ( cfg.command is null || cfg.command == "" ) {
+	if ( !cfg.oneSided && (cfg.command is null || cfg.command == "") ) {
 		printUsage();
 		stderr.writeln("rem0tely: Error: Missing command to run.");
 		throw new UsageException();
@@ -585,10 +603,17 @@ int runCommand(Config cfg)
 	import std.format;
 	import std.process;
 
+	string hostCommand;
+	if ( cfg.oneSided )
+		hostCommand = "";
+	else
+		hostCommand = format("rem0tely-host %s %s",
+			cfg.command, cfg.commandArgs.joiner(" "));
+
 	debug writefln("Running command %s", cfg.command);
 	auto pid = std.process.spawnShell(format(
-		"ssh %s -R 2049:localhost:3049 %s rem0tely-host %s %s",
-		cfg.sshOpts, cfg.userhost, cfg.command, cfg.commandArgs.joiner(" ")));
+		"ssh %s -R 3049:localhost:2049 %s %s",
+		cfg.sshOpts, cfg.userhost, hostCommand));
 	debug writeln("Done: command");
 	return wait(pid);
 }
