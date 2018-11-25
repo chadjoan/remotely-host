@@ -447,7 +447,7 @@ private string getBindPath(Config cfg)
 	// I know VMS doesn't format PIDs with %d (it conventionally uses hex to
 	// display PIDs), but is there any operating system that I care about that
 	// does it differently?
-	return format("/tmp/rem0tely-%s-%d",timestr,pid);;
+	return format("/tmp/rem0tely-%s-%d",timestr,pid);
 }
 
 void setupNfsEntry(Config cfg)
