@@ -1,3 +1,5 @@
+module rem0tely;
+
 import std.stdio;
 
 immutable string usage =
